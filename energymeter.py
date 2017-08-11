@@ -9,7 +9,7 @@ __email__   = 'stanjanssen@finetuned.nl'
 __url__     = 'https://finetuned.nl/'
 __license__ = 'Apache License, Version 2.0'
 
-__version__ = '0.7'
+__version__ = '0.72'
 __status__  = 'Beta'
 
 import random
@@ -617,6 +617,8 @@ class SMAMeter:
             results[regname] = self._convert_value(values=values,
                                                    signed=register['signed'],
                                                    decimals=register['decimals'])
+            if regname == "power_factor_total" and results[regname] == 0:
+                results[regname] = 1    # The SMA will send out a 0 when the power factor is 100%
         return results
 
     def _convert_value(self, values, signed=False, decimals=0):
@@ -683,7 +685,7 @@ class SMAMeter:
     REG_OFFSET = 1
     PROTOCOL_CODE = 0
     FUNCTION_CODE = 3
-    NULLS = [2**16 - 1, 2**15 - 1, 2**15]
+    NULLS = [2**16 - 1, 2**15 - 1, 2**15, -2**15]
 
 if __name__ == "__main__":
     import json
