@@ -9,7 +9,7 @@ __email__   = 'stanjanssen@finetuned.nl'
 __url__     = 'https://finetuned.nl/'
 __license__ = 'Apache License, Version 2.0'
 
-__version__ = '0.72'
+__version__ = '0.73'
 __status__  = 'Beta'
 
 import random
@@ -71,8 +71,10 @@ class ABBMeter:
             registers.sort(key=lambda reg: reg['start'])
             return self._batch_read(registers)
         elif type(regnames) is str:
-            register = [register for register in self.registers if register['name'] is regnames][0]
-            return self._read_single(register)
+            registers = [register for register in self.registers if register['name'] == regnames]
+            if len(registers) == 0:
+                return "Register not found on device."
+            return self._read_single(registers[0])
         else:
             raise TypeError
 
@@ -93,7 +95,7 @@ class ABBMeter:
         if register['length'] is 4:
             value = self.instrument.read_registers(registeraddress=register['start'],
                                                    numberOfRegisters=register['length'])
-            return self._convert_value(bytestring=bytes(value),
+            return self._convert_value(values=value,
                                        signed=register['signed'],
                                        numberOfDecimals=register['decimals'])
 
@@ -551,14 +553,16 @@ class SMAMeter:
             registers = SMAMeter.REGS
             return self._read_multiple(registers)
         if type(regnames) is str:
-            register = [register for register in SMAMeter.REGS if register['name'] is regnames][0]
-            return self._read_single(register)
+            registers = [register for register in SMAMeter.REGS if register['name'] == regnames]
+            if len(registers) == 0:
+                return "Register not found on device."
+            return self._read_single(registers[0])
         if type(regnames) is list:
             registers = [register for register in SMAMeter.REGS if register['name'] in regnames]
             return self._read_multiple(registers)
 
     def _read_single(self, register):
-        message = self._modbus_message(start_reg=register['start'], num_regs=1)
+        message = self._modbus_message(start_reg=register['start'], num_regs=register['length'])
         data = self._perform_request(message)
         return self._convert_value(data, signed=register['signed'], decimals=register['decimals'])
 
@@ -688,10 +692,30 @@ class SMAMeter:
     NULLS = [2**16 - 1, 2**15 - 1, 2**15, -2**15]
 
 if __name__ == "__main__":
-    import json
-    import datetime
-    sma = SMAMeter('192.168.0.235')
-    while True:
-        values = sma.read()
-        print(datetime.datetime.now())
-        print(json.dumps(values, indent=4))
+    import argparse
+
+    parser = argparse.ArgumentParser(description='Read energy meters.')
+    parser.add_argument('--device', '-d', dest='device', required=True, type=str, help='the serial port or IP-address for the device')
+    parser.add_argument('--baud', '-b', dest='baud', required=False, default=38400, type=int, help='the serial baudrate')
+    parser.add_argument('--type', '-t', dest='devtype', required=True, type=str, help='the type of energy meter: abb or sma')
+    parser.add_argument('--slaveaddress', '-a', dest='slaveaddress', default=1, nargs=1, type=int, help='the modbus slave address (only when using serial)')
+    parser.add_argument('--registers', '-r', dest='regs', type=str, help='the register you wish to read (default: all)', nargs='+')
+    args = parser.parse_args()
+
+    types = {'abb': ABBMeter,
+             'sma': SMAMeter}
+
+    meter = types[args.devtype](port=args.device, baudrate=args.baud, slaveaddress=args.slaveaddress[0])
+
+    if args.regs is None:
+        result = meter.read()
+    elif len(args.regs) == 1:
+        result = meter.read(args.regs[0])
+    else:
+        result = meter.read(args.regs)
+
+    if args.regs is None or len(args.regs) > 1:
+        for key in result:
+            print(key + ": " + str(result[key]))
+    else:
+        print(result)
