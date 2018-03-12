@@ -850,7 +850,7 @@ class AsyncModbusTCPMeter(ModbusTCPMeter):
     async def read(self, regnames=None):
         if regnames is None:
             registers = self.REGS
-            return await self.read_multiple(registers)
+            return await self._read_multiple(registers)
 
         if isinstance(regnames, str):
             registers = [register for register in self.REGS if register['name'] == regnames]
