@@ -9,14 +9,16 @@ __email__   = 'stanjanssen@finetuned.nl'
 __url__     = 'https://finetuned.nl/'
 __license__ = 'Apache License, Version 2.0'
 
-__version__ = '0.73'
+__version__ = '1.0.1'
 __status__  = 'Beta'
 
 import random
 import socket
 import struct
+import asyncio
 import time
 import minimalmodbus
+from collections import Iterable
 
 class ABBMeter:
     """Meter class that uses a minimalmodbus Instrument to query an ABB meter."""
@@ -118,7 +120,7 @@ class ABBMeter:
 
     def _batch_read(self, registers):
         """
-        Read multiple registers in batches, limiting each batch to at most 128 registers.
+        Read multiple registers in batches, limiting each batch to at most 125 registers.
 
         Arguments:
             * A list of registers (complete structs)
@@ -131,7 +133,7 @@ class ABBMeter:
         batch = []
         results = {}
         for register in registers:
-            if register['start'] + register['length'] - start_reg < 128:
+            if register['start'] + register['length'] - start_reg <= 125:
                 batch.append(register)
             else:
                 results.update(self._read_multiple(batch))
@@ -539,26 +541,27 @@ class ABBMeter:
                }
     NULLS = [pow(2, n) - 1 for n in (64, 63, 32, 31, 16, 15)]
 
-class SMAMeter:
-    """
-    Implementation for a Sunny Boy SMA Modbus over TCP meter.
 
+class ModbusTCPMeter:
+    """
+    Implementation for a Modbus TCP Energy Meter.
     """
     def __init__(self, port, tcp_port=502, slaveaddress=126, type=None, baudrate=None):
-        self.device = socket.create_connection(address=(port, tcp_port))
+        self.port = port
+        self.tcp_port = tcp_port
         self.device_id = slaveaddress
 
     def read(self, regnames=None):
         if regnames is None:
-            registers = SMAMeter.REGS
+            registers = self.REGS
             return self._read_multiple(registers)
+
         if type(regnames) is str:
-            registers = [register for register in SMAMeter.REGS if register['name'] == regnames]
-            if len(registers) == 0:
-                return "Register not found on device."
+            registers = [register for register in self.REGS if register['name'] == regnames]
             return self._read_single(registers[0])
+
         if type(regnames) is list:
-            registers = [register for register in SMAMeter.REGS if register['name'] in regnames]
+            registers = [register for register in self.REGS if register['name'] in regnames]
             return self._read_multiple(registers)
 
     def _read_single(self, register):
@@ -568,23 +571,43 @@ class SMAMeter:
 
     def _read_multiple(self, registers):
         registers.sort(key=lambda reg: reg['start'])
-        first_reg = min([register['start'] for register in registers])
-        num_regs = max([register['start'] + register['length'] for register in registers]) - first_reg
-        message = self._modbus_message(start_reg=first_reg, num_regs=num_regs)
-        data = self._perform_request(message)
-        return self._interpret_result(data, registers)
+        results = {}
+        for reg_range in self._split_ranges(registers):
+            first_reg = min([register['start'] for register in reg_range])
+            num_regs = max([register['start'] + register['length'] for register in reg_range]) - first_reg
+            message = self._modbus_message(start_reg=first_reg, num_regs=num_regs)
+            data = self._perform_request(message)
+            results.update(self._interpret_result(data, reg_range))
+        return results
+
+    def _split_ranges(self, registers):
+        """
+        Generator that splits the registers list into continuous parts.
+        """
+        reg_list = []
+        prev_end = registers[0]['start'] - 1
+        for r in registers:
+            if r['start'] - prev_end > 1:
+                yield reg_list
+                reg_list = []
+            reg_list.append(r)
+            prev_end = r['start'] + r['length']
+        yield reg_list
+
 
     def _modbus_message(self, start_reg, num_regs):
         transaction_id = random.randint(1, 2**16 - 1)
         return struct.pack(">HHHBBHH", transaction_id,
-                                       SMAMeter.PROTOCOL_CODE,
+                                       self.PROTOCOL_CODE,
                                        6,
                                        self.device_id,
-                                       SMAMeter.FUNCTION_CODE,
-                                       start_reg - SMAMeter.REG_OFFSET,
+                                       self.FUNCTION_CODE,
+                                       start_reg - self.REG_OFFSET,
                                        num_regs)
 
     def _perform_request(self, message):
+        if self.device is None:
+            self._connect()
         self.device.send(message)
         data = bytes()
         expect_bytes = 9 + 2 * struct.unpack(">H", message[-2:])[0]
@@ -658,10 +681,19 @@ class SMAMeter:
 
         value = struct.unpack(formatcode_o, bytes(values))[0]
 
-        if value in SMAMeter.NULLS:
+        if value in self.NULLS:
             return None
         else:
             return float(value) / 10 ** decimals
+
+    def _connect(self):
+        self.device = socket.create_connection(address=(self.port, self.tcp_port))
+
+
+
+class SMAMeter(ModbusTCPMeter):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
 
     REGS = [
             {'name': 'current_ac', 'start': 40188, 'length': 1, 'signed': False, 'decimals': 1},
@@ -691,31 +723,180 @@ class SMAMeter:
     FUNCTION_CODE = 3
     NULLS = [2**16 - 1, 2**15 - 1, 2**15, -2**15]
 
-if __name__ == "__main__":
-    import argparse
 
-    parser = argparse.ArgumentParser(description='Read energy meters.')
-    parser.add_argument('--device', '-d', dest='device', required=True, type=str, help='the serial port or IP-address for the device')
-    parser.add_argument('--baud', '-b', dest='baud', required=False, default=38400, type=int, help='the serial baudrate')
-    parser.add_argument('--type', '-t', dest='devtype', required=True, type=str, help='the type of energy meter: abb or sma')
-    parser.add_argument('--slaveaddress', '-a', dest='slaveaddress', default=1, nargs=1, type=int, help='the modbus slave address (only when using serial)')
-    parser.add_argument('--registers', '-r', dest='regs', type=str, help='the register you wish to read (default: all)', nargs='+')
-    args = parser.parse_args()
+class MulticubeMeter(ModbusTCPMeter):
+    """
+    Implementation for a Multicube energy meter over Modbus TCP.
+    """
+    def __init__(self, port, tcp_port=1502, slaveaddress=1, type=None, baudrate=None, auto_scale=True):
+        super().__init__(port, tcp_port, slaveaddress, type, baudrate)
+        self.device = socket.create_connection(address=(port, tcp_port))
+        self.device_id = slaveaddress
+        self.REGS = [
+            {'name': 'energy_scale', 'start': 512, 'length': 2, 'decimals': 0, 'signed': True},
+            {'name': 'active_net', 'start': 514, 'length': 2, 'decimals': 0, 'signed': True},
+            {'name': 'apparent_net', 'start': 516, 'length': 2, 'decimals': 0, 'signed': True},
+            {'name': 'reactive_net', 'start': 518, 'length': 2, 'decimals': 0, 'signed': True},
+            {'name': 'active_power_total', 'start': 2816, 'length': 1, 'decimals': 0, 'signed': True},
+            {'name': 'apparent_power_total', 'start': 2817, 'length': 1, 'decimals': 0, 'signed': True},
+            {'name': 'reactive_power_total', 'start': 2818, 'length': 1, 'decimals': 0, 'signed': True},
+            {'name': 'power_factor_total', 'start': 2819, 'length': 1, 'decimals': 3, 'signed': True},
+            {'name': 'frequency', 'start': 2820, 'length': 1, 'decimals': 1, 'signed': True},
+            {'name': 'voltage_l1_n', 'start': 2821, 'length': 1, 'decimals': 0, 'signed': True},
+            {'name': 'current_l1', 'start': 2822, 'length': 1, 'decimals': 0, 'signed': True},
+            {'name': 'active_power_l1', 'start': 2823, 'length': 1, 'decimals': 0, 'signed': True},
+            {'name': 'voltage_l2_n', 'start': 2824, 'length': 1, 'decimals': 0, 'signed': True},
+            {'name': 'current_l2', 'start': 2825, 'length': 1, 'decimals': 0, 'signed': True},
+            {'name': 'active_power_l2', 'start': 2826, 'length': 1, 'decimals': 0, 'signed': True},
+            {'name': 'voltage_l3_n', 'start': 2827, 'length': 1, 'decimals': 0, 'signed': True},
+            {'name': 'current_l3', 'start': 2828, 'length': 1, 'decimals': 0, 'signed': True},
+            {'name': 'active_power_l3', 'start': 2829, 'length': 1, 'decimals': 0, 'signed': True},
+            {'name': 'power_factor_l1', 'start': 2830, 'length': 1, 'decimals': 0, 'signed': True},
+            {'name': 'power_factor_l2', 'start': 2831, 'length': 1, 'decimals': 0, 'signed': True},
+            {'name': 'power_factor_l3', 'start': 2832, 'length': 1, 'decimals': 0, 'signed': True},
+            {'name': 'voltage_l1_l2', 'start': 2833, 'length': 1, 'decimals': 0, 'signed': True},
+            {'name': 'voltage_l2_l3', 'start': 2834, 'length': 1, 'decimals': 0, 'signed': True},
+            {'name': 'voltage_l3_l1', 'start': 2835, 'length': 1, 'decimals': 0, 'signed': True},
+            {'name': 'current_n', 'start': 2836, 'length': 1, 'decimals': 0, 'signed': True},
+            {'name': 'amps_scale', 'start': 2837, 'length': 1, 'decimals': 0, 'signed': True},
+            {'name': 'phase_volts_scale', 'start': 2838, 'length': 1, 'decimals': 0, 'signed': True},
+            {'name': 'line_volts_scale', 'start': 2839, 'length': 1, 'decimals': 0, 'signed': True},
+            {'name': 'power_scale', 'start': 2840, 'length': 1, 'decimals': 0, 'signed': True},
+            {'name': 'apparent_power_l1', 'start': 3072, 'length': 1, 'decimals': 0, 'signed': True},
+            {'name': 'apparent_power_l2', 'start': 3073, 'length': 1, 'decimals': 0, 'signed': True},
+            {'name': 'apparent_power_l3', 'start': 3074, 'length': 1, 'decimals': 0, 'signed': True},
+            {'name': 'reactive_power_l1', 'start': 3075, 'length': 1, 'decimals': 0, 'signed': True},
+            {'name': 'reactive_power_l2', 'start': 3076, 'length': 1, 'decimals': 0, 'signed': True},
+            {'name': 'reactive_power_l3', 'start': 3077, 'length': 1, 'decimals': 0, 'signed': True},
+            {'name': 'peak_current_l1', 'start': 3078, 'length': 1, 'decimals': 0, 'signed': True},
+            {'name': 'peak_current_l2', 'start': 3079, 'length': 1, 'decimals': 0, 'signed': True},
+            {'name': 'peak_current_l3', 'start': 3080, 'length': 1, 'decimals': 0, 'signed': True},
+            {'name': 'current_l1_thd', 'start': 3081, 'length': 1, 'decimals': 3, 'signed': True},
+            {'name': 'current_l2_thd', 'start': 3082, 'length': 1, 'decimals': 3, 'signed': True},
+            {'name': 'current_l3_thd', 'start': 3083, 'length': 1, 'decimals': 3, 'signed': True}
+           ]
+        if auto_scale:
+            self.set_scaling()
 
-    types = {'abb': ABBMeter,
-             'sma': SMAMeter}
+    def set_scaling(self):
+        """
+        Call this function before reading anything to set up the correct scaling for this meter.
+        """
+        decimals_mapping = {1: 2, 2: 1, 3: 0, 4: -1, 5: -2, 6: -3, 7: -4}
 
-    meter = types[args.devtype](port=args.device, baudrate=args.baud, slaveaddress=args.slaveaddress[0])
+        a_registers = ['current_l1', 'current_l2', 'current_l3', 'current_n']
+        scale = int(self.read('amps_scale'))
+        for r in self.REGS:
+            if r['name'] in a_registers:
+                r['decimals'] = decimals_mapping[scale]
 
-    if args.regs is None:
-        result = meter.read()
-    elif len(args.regs) == 1:
-        result = meter.read(args.regs[0])
-    else:
-        result = meter.read(args.regs)
+        pv_registers = ['voltage_l1_n', 'voltage_l2_n', 'voltage_l3_n']
+        scale = int(self.read('phase_volts_scale'))
+        for r in self.REGS:
+            if r['name'] in pv_registers:
+                r['decimals'] = decimals_mapping[scale]
 
-    if args.regs is None or len(args.regs) > 1:
-        for key in result:
-            print(key + ": " + str(result[key]))
-    else:
-        print(result)
+        lv_registers = ['voltage_l1_l2', 'voltage_l2_l3', 'voltage_l3_l1']
+        scale = int(self.read('line_volts_scale'))
+        for r in self.REGS:
+            if r['name'] in lv_registers:
+                r['decimals'] = decimals_mapping[scale]
+
+        p_registers = ['active_power_total',
+                       'reactive_power_total',
+                       'apparent_power_total',
+                       'active_power_l1',
+                       'active_power_l2',
+                       'active_power_l3',
+                       'apparent_power_l1',
+                       'apparent_power_l2',
+                       'apparent_power_l3',
+                       'reactive_power_l1',
+                       'reactive_power_l2',
+                       'reactive_power_l3']
+        scale = int(self.read('power_scale'))
+        for r in self.REGS:
+            if r['name'] in p_registers:
+                r['decimals'] = decimals_mapping[scale]
+
+        e_registers = ['active_net', 'apparent_net', 'reactive_net']
+        decimals_mapping = {3: 3, 4: 2, 5: 1, 6: 0, 7: -1}
+        scale = int(self.read('energy_scale'))
+        for r in self.REGS:
+            if r['name'] in e_registers:
+                r['decimals'] = decimals_mapping[scale]
+
+    REG_OFFSET = 0
+    PROTOCOL_CODE = 0
+    FUNCTION_CODE = 3
+    NULLS = [2**16 - 1, 2**15 - 1, 2**15, -2**15]
+
+
+class AsyncModbusTCPMeter(ModbusTCPMeter):
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.reader = self.writer = None
+
+    async def _connect(self):
+        self.reader, self.writer = await asyncio.open_connection(host=self.port, port=self.tcp_port)
+
+    async def read(self, regnames=None):
+        if regnames is None:
+            registers = self.REGS
+            return await self.read_multiple(registers)
+
+        if isinstance(regnames, str):
+            registers = [register for register in self.REGS if register['name'] == regnames]
+            if len(registers) == 0:
+                return "Register not found on device."
+            return await self.read_single(registers[0])
+
+        if isinstance(regnames, Iterable):
+            registers = [register for register in self.REGS if register['name'] in regnames]
+            return await self._read_multiple(registers)
+
+    async def _read_single(self, register):
+        message = self._modbus_message(start_reg=register['start'], num_regs=register['length'])
+        if self.writer is None:
+            await self._connect()
+        self.writer.write(message)
+        await self.writer.drain()
+
+        data = await self.reader.read_exactly(9 + 2 * num_regs)
+        return self._convert_value(data, signed=register['signed'], decimals=register['decimals'])
+
+    async def _read_multiple(self, registers):
+        registers.sort(key=lambda reg: reg['start'])
+        results = {}
+        for reg_range in self._split_ranges(registers):
+            # Prepare the request
+            first_reg = min([register['start'] for register in reg_range])
+            num_regs = max([register['start'] + register['length'] for register in reg_range]) - first_reg
+
+            if self.writer is None:
+                await self._connect()
+            self.writer.write(self._modbus_message(first_reg, num_regs))
+            await self.writer.drain()
+
+            # Receive the response
+
+            data = await self.reader.readexactly(9 + 2 * num_regs)
+            results.update(self._interpret_result(data[9:], reg_range))
+        return results
+
+
+class AsyncABBTCPMeter(AsyncModbusTCPMeter):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if type in ABBMeter.REGSETS:
+            self.registers = [register for register in ABBMeter.REGS if register['name'] in ABBMeter.REGSETS[type]]
+        else:
+            self.registers = ABBMeter.REGS
+
+    REGS = ABBMeter.REGS
+    REGSETS = ABBMeter.REGSETS
+    NULLS = ABBMeter.NULLS
+    PROTOCOL_CODE = 0
+    FUNCTION_CODE = 3
+    REG_OFFSET = 0
