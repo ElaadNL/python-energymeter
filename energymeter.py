@@ -643,12 +643,13 @@ class ModbusTCPMeter:
             values = data[start:end]
             results[regname] = self._convert_value(values=values,
                                                    signed=register['signed'],
-                                                   decimals=register['decimals'])
+                                                   decimals=register['decimals'],
+                                                   isFloat=register['isFloat'])
             if regname == "power_factor_total" and results[regname] == 0:
                 results[regname] = 1    # The SMA will send out a 0 when the power factor is 100%
         return results
 
-    def _convert_value(self, values, signed=False, decimals=0):
+    def _convert_value(self, values, signed=False, decimals=0, isFloat=False):
         """
         Convert a list of returned integers to the intended value.
 
@@ -656,28 +657,33 @@ class ModbusTCPMeter:
             * bytestring: a list of integers that together represent the value
             * signed: whether the value is a signed value
             * decimals: number of decimals the return value should contain
+            * isFloat: whether the valie is a float
 
         """
         numberOfBytes = len(values)
         formatcode_o = '>'
 
-        if numberOfBytes == 1:
+        if isFloat:
+            formatcode_o += 'f'
+
+        elif numberOfBytes == 1:
             if signed:
                 formatcode_o += "b"
             else:
                 formatcode_o += "B"
 
-        if numberOfBytes == 2:
+        elif numberOfBytes == 2:
             if signed:
                 formatcode_o += "h"
             else:
                 formatcode_o += "H"
 
-        if numberOfBytes == 4:
+        elif numberOfBytes == 4:
             if signed:
                 formatcode_o += "l"
             else:
                 formatcode_o += "L"
+
 
         value = struct.unpack(formatcode_o, bytes(values))[0]
 
@@ -850,21 +856,22 @@ class AsyncModbusTCPMeter(ModbusTCPMeter):
             registers = [register for register in self.REGS if register['name'] == regnames]
             if len(registers) == 0:
                 return "Register not found on device."
-            return await self.read_single(registers[0])
+            return await self._read_single(registers[0])
 
         if isinstance(regnames, Iterable):
             registers = [register for register in self.REGS if register['name'] in regnames]
             return await self._read_multiple(registers)
 
     async def _read_single(self, register):
-        message = self._modbus_message(start_reg=register['start'], num_regs=register['length'])
+        num_regs = register['length']
+        message = self._modbus_message(register['start'], num_regs)
         if self.writer is None:
             await self._connect()
         self.writer.write(message)
         await self.writer.drain()
 
-        data = await self.reader.read_exactly(9 + 2 * num_regs)
-        return self._convert_value(data, signed=register['signed'], decimals=register['decimals'])
+        data = await self.reader.readexactly(9 + 2 * num_regs)
+        return self._convert_value(data[9:], signed=register['signed'], decimals=register['decimals'], isFloat=register['isFloat']|False)
 
     async def _read_multiple(self, registers):
         registers.sort(key=lambda reg: reg['start'])
