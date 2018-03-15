@@ -9,7 +9,7 @@ __email__   = 'stanjanssen@finetuned.nl'
 __url__     = 'https://finetuned.nl/'
 __license__ = 'Apache License, Version 2.0'
 
-__version__ = '1.0.1'
+__version__ = '1.0.2'
 __status__  = 'Beta'
 
 import random
