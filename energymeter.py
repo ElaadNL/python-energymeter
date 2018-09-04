@@ -9,7 +9,7 @@ __email__   = 'stanjanssen@finetuned.nl'
 __url__     = 'https://finetuned.nl/'
 __license__ = 'Apache License, Version 2.0'
 
-__version__ = '1.0.2'
+__version__ = '1.0.5'
 __status__  = 'Beta'
 
 import random
@@ -47,7 +47,7 @@ class ABBMeter:
         """ Read one, many or all registers from the device
 
         Args:
-            * registers (str or list). If None, read all. If string, read
+            * regnames (str or list). If None, read all. If string, read
               single register. If list, read all registers from list.
 
         Returns:
@@ -82,7 +82,13 @@ class ABBMeter:
 
     def _read_single(self, register):
         """
-        Read a single register and return the value.
+        Read a single register and return the value. Not to be called directly.
+
+        Arguments:
+        * register: a 'register' dict that contains info on the register.
+
+        Returns:
+        * The interpreted value from the meter.
         """
 
         if register['length'] is 1:
@@ -694,7 +700,6 @@ class ModbusTCPMeter:
 
     def _connect(self):
         self.device = socket.create_connection(address=(self.port, self.tcp_port))
-
 
 
 class SMAMeter(ModbusTCPMeter):
