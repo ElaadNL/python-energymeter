@@ -9,7 +9,7 @@ __email__   = 'stanjanssen@finetuned.nl'
 __url__     = 'https://finetuned.nl/'
 __license__ = 'Apache License, Version 2.0'
 
-__version__ = '1.0.5'
+__version__ = '1.1.0'
 __status__  = 'Beta'
 
 import random
@@ -18,7 +18,7 @@ import struct
 import asyncio
 import time
 import minimalmodbus
-import sbus
+import tinysbus
 from collections import Iterable
 
 class ABBMeter:
@@ -916,7 +916,7 @@ class AsyncABBTCPMeter(AsyncModbusTCPMeter):
 
 
 class SaiaMeter:
-    def __init__(self, port, baudrate=38400, slaveaddress=1, type=None):
+    def __init__(self, port, baudrate=38400, slaveaddress=1, type=None, **kwargs):
         """ Initialize the ABBMeter object.
 
         Arguments:
@@ -929,9 +929,10 @@ class SaiaMeter:
             * An ABBMeter object
 
         """
-        minimalmodbus.BAUDRATE = baudrate
-        minimalmodbus.TIMEOUT = 0.5
-        self.instrument = sbus.Instrument(address=slaveaddress, serial_port=port, baudrate=baudrate)
+        self.instrument = tinysbus.Instrument(address=slaveaddress,
+                                              serial_port=port,
+                                              baudrate=baudrate,
+                                              **kwargs)
 
     def read(self, regnames=None):
         """ Read one, many or all registers from the device
@@ -965,7 +966,7 @@ class SaiaMeter:
         elif type(regnames) is str:
             registers = [register for register in self.REGS if register['name'] == regnames]
             if len(registers) == 0:
-                return "Register not found on device."
+                raise ValueError("Register not found on device.")
             return self._read_single(registers[0])
         else:
             raise TypeError
@@ -981,17 +982,17 @@ class SaiaMeter:
         * The interpreted value from the meter.
         """
 
-        if register['length'] is 1:
-            return self.instrument.read_register(registeraddress=register['start'],
+        if register['length'] == 1:
+            return self.instrument.read_register(register_address=register['start'],
                                                  number_of_decimals=register['decimals'],
                                                  signed=register['signed'])
-        if register['length'] is 2:
-            value = self.instrument.read_long(registeraddress=register['start'],
+        if register['length'] == 2:
+            value = self.instrument.read_long(register_address=register['start'],
                                               signed=register['signed'])
             return value / 10 ** register['decimals']
 
-        if register['length'] is 4:
-            value = self.instrument.read_registers(registeraddress=register['start'],
+        if register['length'] == 4:
+            value = self.instrument.read_registers(register_address=register['start'],
                                                    number_of_registers=register['length'])
             return self._convert_value(values=value,
                                        signed=register['signed'],
