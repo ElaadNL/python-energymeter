@@ -21,10 +21,12 @@ import minimalmodbus
 import tinysbus
 from collections import Iterable
 
-class ABBMeter:
+DEBUG = False
+
+class ModbusRTUMeter:
     """Meter class that uses a minimalmodbus Instrument to query an ABB meter."""
-    def __init__(self, port, baudrate=38400, slaveaddress=1, type=None):
-        """ Initialize the ABBMeter object.
+    def __init__(self, port, baudrate=38400, slaveaddress=1, timeout=0.5):
+        """ Initialize the ModbusRTUmeter object.
 
         Arguments:
             * port: a serial port (string)
@@ -36,13 +38,9 @@ class ABBMeter:
             * An ABBMeter object
 
         """
-        minimalmodbus.BAUDRATE = baudrate
-        minimalmodbus.TIMEOUT = 0.5
-        self.instrument = minimalmodbus.Instrument(port, slaveaddress)
-        if type in ABBMeter.REGSETS:
-            self.registers = [register for register in ABBMeter.REGS if register['name'] in ABBMeter.REGSETS[type]]
-        else:
-            self.registers = ABBMeter.REGS
+        self.instrument = minimalmodbus.Instrument(port, slaveaddress, debug=DEBUG)
+        self.instrument.serial.baudrate = baudrate
+        self.instrument.serial.timeout = timeout
 
     def read(self, regnames=None):
         """ Read one, many or all registers from the device
@@ -59,22 +57,22 @@ class ABBMeter:
             * KeyError, TypeError, IOError
         """
         if regnames is None:
-            return self._batch_read(self.registers)
+            return self._batch_read(self.REGS)
         if type(regnames) is list:
-            registers = [register for register in self.registers if register['name'] in regnames]
+            registers = [register for register in self.REGS if register['name'] in regnames]
             if len(registers) < len(regnames):
-                regs_not_available = [regname for regname in regnames if regname not in \
-                                      [register['name'] for register in self.registers]]
+                regs_not_available = [regname for regname in regnames if regname not in
+                                      [register['name'] for register in self.REGS]]
                 print("Warning: the following registers are not available on this device: " +
                       ", ".join(regs_not_available))
                 print("The available registers are: %s" +
-                      ", ".join(register['name'] for register in self.registers))
+                      ", ".join(register['name'] for register in self.REGS))
             if len(registers) == 0:
                 return {}
             registers.sort(key=lambda reg: reg['start'])
             return self._batch_read(registers)
         elif type(regnames) is str:
-            registers = [register for register in self.registers if register['name'] == regnames]
+            registers = [register for register in self.REGS if register['name'] == regnames]
             if len(registers) == 0:
                 return "Register not found on device."
             return self._read_single(registers[0])
@@ -92,21 +90,26 @@ class ABBMeter:
         * The interpreted value from the meter.
         """
 
-        if register['length'] is 1:
+        if register['length'] == 1:
             return self.instrument.read_register(registeraddress=register['start'],
                                                  number_of_decimals=register['decimals'],
                                                  signed=register['signed'])
-        if register['length'] is 2:
-            value = self.instrument.read_long(registeraddress=register['start'],
-                                              signed=register['signed'])
-            return value / 10 ** register['decimals']
+        if register['length'] == 2:
+            if register.get('float'):
+                return self.instrument.read_float(registeraddress=register['start'],
+                                                  number_of_registers=2)
+            else:
+                value = self.instrument.read_long(registeraddress=register['start'],
+                                                  signed=register['signed'])
+                return value / 10 ** register['decimals']
 
-        if register['length'] is 4:
+        if register['length'] == 4:
             value = self.instrument.read_registers(registeraddress=register['start'],
                                                    number_of_registers=register['length'])
             return self._convert_value(values=value,
                                        signed=register['signed'],
-                                       number_of_decimals=register['decimals'])
+                                       number_of_decimals=register['decimals'],
+                                       float=register.get('float'))
 
     def _read_multiple(self, registers):
         """
@@ -174,10 +177,11 @@ class ABBMeter:
             values = data[start:end]
             results[regname] = self._convert_value(values=values,
                                                    signed=register['signed'],
-                                                   number_of_decimals=register['decimals'])
+                                                   number_of_decimals=register['decimals'],
+                                                   float=register.get('float'))
         return results
 
-    def _convert_value(self, values, signed=False, number_of_decimals=0):
+    def _convert_value(self, values, signed=False, number_of_decimals=0, float=False):
         """
         Convert a list of returned integers to the intended value.
 
@@ -186,6 +190,13 @@ class ABBMeter:
             * signed: whether the value is a signed value
             * decimals: number of decimals the return value should contain
         """
+        if float:
+            if len(values) == 2:
+                bytestring = struct.pack('>HH', *values)
+                return struct.unpack('>f', bytestring)[0]
+            elif len(values) == 4:
+                bytestring = struct.pack('>HHHH', *values)
+                return struct.unpack('>d', bytestring)[0]
 
         number_of_registers = len(values)
         formatcode_i = '>'
@@ -220,266 +231,278 @@ class ABBMeter:
         else:
             return float(value) / 10 ** number_of_decimals
 
+    NULLS = []
+    REGS = []
+
+
+class ABBMeter(ModbusRTUMeter):
+    def __init__(self, port, baudrate=38400, slaveaddress=1, timeout=0.5, model=None):
+        super().__init__(port, baudrate, slaveaddress, timeout)
+        if model in ABBMeter.REGSETS:
+            self.REGS = [register for register in ABBMeter._REGS if register['name'] in ABBMeter.REGSETS[type]]
+        else:
+            self.REGS = ABBMeter._REGS
+
     # Register map of the ABB A and B series energy meters.
-    REGS = [{'name': 'active_import',              'start': 20480, 'length': 4, 'signed': True, 'decimals': 2},
-            {'name': 'active_export',              'start': 20484, 'length': 4, 'signed': True, 'decimals': 2},
-            {'name': 'active_net',                 'start': 20488, 'length': 4, 'signed': True, 'decimals': 2},
-            {'name': 'reactive_import',            'start': 20492, 'length': 4, 'signed': True, 'decimals': 2},
-            {'name': 'reactive_export',            'start': 20496, 'length': 4, 'signed': True, 'decimals': 2},
-            {'name': 'reactive_net',               'start': 20500, 'length': 4, 'signed': True, 'decimals': 2},
-            {'name': 'apparent_import',            'start': 20504, 'length': 4, 'signed': True, 'decimals': 2},
-            {'name': 'apparent_export',            'start': 20508, 'length': 4, 'signed': True, 'decimals': 2},
-            {'name': 'apparent_net',               'start': 20512, 'length': 4, 'signed': True, 'decimals': 2},
-            {'name': 'active_import_co2',          'start': 20516, 'length': 4, 'signed': True, 'decimals': 2},
-            {'name': 'active_import_currency',     'start': 20532, 'length': 4, 'signed': True, 'decimals': 2},
-            {'name': 'active_import_tariff_1',     'start': 20848, 'length': 4, 'signed': False, 'decimals': 2},
-            {'name': 'active_import_tariff_2',     'start': 20852, 'length': 4, 'signed': False, 'decimals': 2},
-            {'name': 'active_import_tariff_3',     'start': 20856, 'length': 4, 'signed': False, 'decimals': 2},
-            {'name': 'active_import_tariff_4',     'start': 20860, 'length': 4, 'signed': False, 'decimals': 2},
-            {'name': 'active_export_tariff_1',     'start': 20880, 'length': 4, 'signed': False, 'decimals': 2},
-            {'name': 'active_export_tariff_2',     'start': 20884, 'length': 4, 'signed': False, 'decimals': 2},
-            {'name': 'active_export_tariff_3',     'start': 20888, 'length': 4, 'signed': False, 'decimals': 2},
-            {'name': 'active_export_tariff_4',     'start': 20892, 'length': 4, 'signed': False, 'decimals': 2},
-            {'name': 'reactive_import_tariff_1',   'start': 20912, 'length': 4, 'signed': False, 'decimals': 2},
-            {'name': 'reactive_import_tariff_2',   'start': 20916, 'length': 4, 'signed': False, 'decimals': 2},
-            {'name': 'reactive_import_tariff_3',   'start': 20920, 'length': 4, 'signed': False, 'decimals': 2},
-            {'name': 'reactive_import_tariff_4',   'start': 20924, 'length': 4, 'signed': False, 'decimals': 2},
-            {'name': 'reactive_export_tariff_1',   'start': 20944, 'length': 4, 'signed': False, 'decimals': 2},
-            {'name': 'reactive_export_tariff_2',   'start': 20948, 'length': 4, 'signed': False, 'decimals': 2},
-            {'name': 'reactive_export_tariff_3',   'start': 20952, 'length': 4, 'signed': False, 'decimals': 2},
-            {'name': 'reactive_export_tariff_4',   'start': 20956, 'length': 4, 'signed': False, 'decimals': 2},
-            {'name': 'active_import_l1',           'start': 21600, 'length': 4, 'signed': False, 'decimals': 2},
-            {'name': 'active_import_l2',           'start': 21604, 'length': 4, 'signed': False, 'decimals': 2},
-            {'name': 'active_import_l3',           'start': 21608, 'length': 4, 'signed': False, 'decimals': 2},
-            {'name': 'active_export_l1',           'start': 21612, 'length': 4, 'signed': False, 'decimals': 2},
-            {'name': 'active_export_l2',           'start': 21616, 'length': 4, 'signed': False, 'decimals': 2},
-            {'name': 'active_export_l3',           'start': 21620, 'length': 4, 'signed': False, 'decimals': 2},
-            {'name': 'active_net_l1',              'start': 21624, 'length': 4, 'signed': True, 'decimals': 2},
-            {'name': 'active_net_l2',              'start': 21628, 'length': 4, 'signed': True, 'decimals': 2},
-            {'name': 'active_net_l3',              'start': 21632, 'length': 4, 'signed': True, 'decimals': 2},
-            {'name': 'reactive_import_l1',         'start': 21636, 'length': 4, 'signed': False, 'decimals': 2},
-            {'name': 'reactive_import_l2',         'start': 21640, 'length': 4, 'signed': False, 'decimals': 2},
-            {'name': 'reactive_import_l3',         'start': 21644, 'length': 4, 'signed': False, 'decimals': 2},
-            {'name': 'reactive_export_l1',         'start': 21648, 'length': 4, 'signed': False, 'decimals': 2},
-            {'name': 'reactive_export_l2',         'start': 21652, 'length': 4, 'signed': False, 'decimals': 2},
-            {'name': 'reactive_export_l3',         'start': 21656, 'length': 4, 'signed': False, 'decimals': 2},
-            {'name': 'reactive_net_l1',            'start': 21660, 'length': 4, 'signed': True, 'decimals': 2},
-            {'name': 'reactive_net_l2',            'start': 21664, 'length': 4, 'signed': True, 'decimals': 2},
-            {'name': 'reactive_net_l3',            'start': 21668, 'length': 4, 'signed': True, 'decimals': 2},
-            {'name': 'apparent_import_l1',         'start': 21672, 'length': 4, 'signed': False, 'decimals': 2},
-            {'name': 'apparent_import_l2',         'start': 21676, 'length': 4, 'signed': False, 'decimals': 2},
-            {'name': 'apparent_import_l3',         'start': 21680, 'length': 4, 'signed': False, 'decimals': 2},
-            {'name': 'apparent_export_l1',         'start': 21684, 'length': 4, 'signed': False, 'decimals': 2},
-            {'name': 'apparent_export_l2',         'start': 21688, 'length': 4, 'signed': False, 'decimals': 2},
-            {'name': 'apparent_export_l3',         'start': 21692, 'length': 4, 'signed': False, 'decimals': 2},
-            {'name': 'apparent_net_l1',            'start': 21696, 'length': 4, 'signed': True, 'decimals': 2},
-            {'name': 'apparent_net_l2',            'start': 21700, 'length': 4, 'signed': True, 'decimals': 2},
-            {'name': 'apparent_net_l3',            'start': 21704, 'length': 4, 'signed': True, 'decimals': 2},
-            {'name': 'resettable_active_import',   'start': 21804, 'length': 4, 'signed': False, 'decimals': 2},
-            {'name': 'resettable_active_export',   'start': 21808, 'length': 4, 'signed': False, 'decimals': 2},
-            {'name': 'resettable_reactive_import', 'start': 21812, 'length': 4, 'signed': False, 'decimals': 2},
-            {'name': 'resettable_reactive_export', 'start': 21816, 'length': 4, 'signed': False, 'decimals': 2},
-            {'name': 'voltage_l1_n',               'start': 23296, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_l2_n',               'start': 23298, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_l3_n',               'start': 23300, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_l1_l2',              'start': 23302, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_l3_l2',              'start': 23304, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_l1_l3',              'start': 23306, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_l1',                 'start': 23308, 'length': 2, 'signed': False, 'decimals': 2},
-            {'name': 'current_l2',                 'start': 23310, 'length': 2, 'signed': False, 'decimals': 2},
-            {'name': 'current_l3',                 'start': 23312, 'length': 2, 'signed': False, 'decimals': 2},
-            {'name': 'current_n',                  'start': 23314, 'length': 2, 'signed': False, 'decimals': 2},
-            {'name': 'active_power_total',         'start': 23316, 'length': 2, 'signed': True, 'decimals': 2},
-            {'name': 'active_power_l1',            'start': 23318, 'length': 2, 'signed': True, 'decimals': 2},
-            {'name': 'active_power_l2',            'start': 23320, 'length': 2, 'signed': True, 'decimals': 2},
-            {'name': 'active_power_l3',            'start': 23322, 'length': 2, 'signed': True, 'decimals': 2},
-            {'name': 'reactive_power_total',       'start': 23324, 'length': 2, 'signed': True, 'decimals': 2},
-            {'name': 'reactive_power_l1',          'start': 23326, 'length': 2, 'signed': True, 'decimals': 2},
-            {'name': 'reactive_power_l2',          'start': 23328, 'length': 2, 'signed': True, 'decimals': 2},
-            {'name': 'reactive_power_l3',          'start': 23330, 'length': 2, 'signed': True, 'decimals': 2},
-            {'name': 'apparent_power_total',       'start': 23332, 'length': 2, 'signed': True, 'decimals': 2},
-            {'name': 'apparent_power_l1',          'start': 23334, 'length': 2, 'signed': True, 'decimals': 2},
-            {'name': 'apparent_power_l2',          'start': 23336, 'length': 2, 'signed': True, 'decimals': 2},
-            {'name': 'apparent_power_l3',          'start': 23338, 'length': 2, 'signed': True, 'decimals': 2},
-            {'name': 'frequency',                  'start': 23340, 'length': 1, 'signed': False, 'decimals': 2},
-            {'name': 'phase_angle_power_total',    'start': 23341, 'length': 1, 'signed': True, 'decimals': 1},
-            {'name': 'phase_angle_power_l1',       'start': 23342, 'length': 1, 'signed': True, 'decimals': 1},
-            {'name': 'phase_angle_power_l2',       'start': 23343, 'length': 1, 'signed': True, 'decimals': 1},
-            {'name': 'phase_angle_power_l3',       'start': 23344, 'length': 1, 'signed': True, 'decimals': 1},
-            {'name': 'phase_angle_voltage_l1',     'start': 23345, 'length': 1, 'signed': True, 'decimals': 1},
-            {'name': 'phase_angle_voltage_l2',     'start': 23346, 'length': 1, 'signed': True, 'decimals': 1},
-            {'name': 'phase_angle_voltage_l3',     'start': 23347, 'length': 1, 'signed': True, 'decimals': 1},
-            {'name': 'phase_angle_current_l1',     'start': 23351, 'length': 1, 'signed': True, 'decimals': 1},
-            {'name': 'phase_angle_current_l2',     'start': 23352, 'length': 1, 'signed': True, 'decimals': 1},
-            {'name': 'phase_angle_current_l3',     'start': 23353, 'length': 1, 'signed': True, 'decimals': 1},
-            {'name': 'power_factor_total',         'start': 23354, 'length': 1, 'signed': True, 'decimals': 3},
-            {'name': 'power_factor_l1',            'start': 23355, 'length': 1, 'signed': True, 'decimals': 3},
-            {'name': 'power_factor_l2',            'start': 23356, 'length': 1, 'signed': True, 'decimals': 3},
-            {'name': 'power_factor_l3',            'start': 23357, 'length': 1, 'signed': True, 'decimals': 3},
-            {'name': 'current_quadrant_total',     'start': 23358, 'length': 1, 'signed': False, 'decimals': 0},
-            {'name': 'current_quadrant_l1',        'start': 23359, 'length': 1, 'signed': False, 'decimals': 0},
-            {'name': 'current_quadrant_l2',        'start': 23360, 'length': 1, 'signed': False, 'decimals': 0},
-            {'name': 'current_quadrant_l3',        'start': 23361, 'length': 1, 'signed': False, 'decimals': 0},
-            {'name': 'voltage_harmonics_l1_n_thd', 'start': 23808, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l1_n_2nd', 'start': 23810, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l1_n_3rd', 'start': 23812, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l1_n_4th', 'start': 23814, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l1_n_5th', 'start': 23816, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l1_n_6th', 'start': 23818, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l1_n_7th', 'start': 23820, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l1_n_8th', 'start': 23822, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l1_n_9th', 'start': 23824, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l1_n_10th', 'start': 23826, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l1_n_11th', 'start': 23828, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l1_n_12th', 'start': 23830, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l1_n_13th', 'start': 23832, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l1_n_14th', 'start': 23834, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l1_n_15th', 'start': 23836, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l1_n_16th', 'start': 23838, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l2_n_thd', 'start': 23936, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l2_n_2nd', 'start': 23938, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l2_n_3rd', 'start': 23940, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l2_n_4th', 'start': 23942, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l2_n_5th', 'start': 23944, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l2_n_6th', 'start': 23946, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l2_n_7th', 'start': 23948, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l2_n_8th', 'start': 23950, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l2_n_9th', 'start': 23952, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l2_n_10th', 'start': 23954, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l2_n_11th', 'start': 23956, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l2_n_12th', 'start': 23958, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l2_n_13th', 'start': 23960, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l2_n_14th', 'start': 23962, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l2_n_15th', 'start': 23964, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l2_n_16th', 'start': 23966, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l3_n_thd', 'start': 24064, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l3_n_2nd', 'start': 24066, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l3_n_3rd', 'start': 24068, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l3_n_4th', 'start': 24070, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l3_n_5th', 'start': 24072, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l3_n_6th', 'start': 24074, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l3_n_7th', 'start': 24076, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l3_n_8th', 'start': 24078, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l3_n_9th', 'start': 24080, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l3_n_10th', 'start': 24082, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l3_n_11th', 'start': 24084, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l3_n_12th', 'start': 24086, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l3_n_13th', 'start': 24088, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l3_n_14th', 'start': 24090, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l3_n_15th', 'start': 24092, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l3_n_16th', 'start': 24094, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l1_l2_thd', 'start': 24192, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l1_l2_2nd', 'start': 24194, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l1_l2_3rd', 'start': 24196, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l1_l2_4th', 'start': 24198, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l1_l2_5th', 'start': 24200, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l1_l2_6th', 'start': 24202, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l1_l2_7th', 'start': 24204, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l1_l2_8th', 'start': 24206, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l1_l2_9th', 'start': 24208, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l1_l2_10th', 'start': 24210, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l1_l2_11th', 'start': 24212, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l1_l2_12th', 'start': 24214, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l1_l2_13th', 'start': 24216, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l1_l2_14th', 'start': 24218, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l1_l2_15th', 'start': 24220, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l1_l2_16th', 'start': 24222, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l3_l2_thd', 'start': 24320, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l3_l2_2nd', 'start': 24322, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l3_l2_3rd', 'start': 24324, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l3_l2_4th', 'start': 24326, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l3_l2_5th', 'start': 24328, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l3_l2_6th', 'start': 24330, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l3_l2_7th', 'start': 24332, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l3_l2_8th', 'start': 24334, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l3_l2_9th', 'start': 24336, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l3_l2_10th', 'start': 24338, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l3_l2_11th', 'start': 24340, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l3_l2_12th', 'start': 24342, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l3_l2_13th', 'start': 24344, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l3_l2_14th', 'start': 24346, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l3_l2_15th', 'start': 24348, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l3_l2_16th', 'start': 24350, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l1_l3_thd', 'start': 24448, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l1_l3_2nd', 'start': 24450, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l1_l3_3rd', 'start': 24452, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l1_l3_4th', 'start': 24454, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l1_l3_5th', 'start': 24456, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l1_l3_6th', 'start': 24458, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l1_l3_7th', 'start': 24460, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l1_l3_8th', 'start': 24462, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l1_l3_9th', 'start': 24464, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l1_l3_10th', 'start': 24466, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l1_l3_11th', 'start': 24468, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l1_l3_12th', 'start': 24470, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l1_l3_13th', 'start': 24472, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l1_l3_14th', 'start': 24474, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l1_l3_15th', 'start': 24476, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'voltage_harmonics_l1_l3_16th', 'start': 24478, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_l1_thd', 'start': 24576, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_l1_2nd', 'start': 24578, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_l1_3rd', 'start': 24580, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_l1_4th', 'start': 24582, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_l1_5th', 'start': 24584, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_l1_6th', 'start': 24586, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_l1_7th', 'start': 24588, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_l1_8th', 'start': 24590, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_l1_9th', 'start': 24592, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_l1_10th', 'start': 24594, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_l1_11th', 'start': 24596, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_l1_12th', 'start': 24598, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_l1_13th', 'start': 24600, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_l1_14th', 'start': 24602, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_l1_15th', 'start': 24604, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_l1_16th', 'start': 24606, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_l2_thd', 'start': 24704, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_l2_2nd', 'start': 24706, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_l2_3rd', 'start': 24708, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_l2_4th', 'start': 24710, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_l2_5th', 'start': 24712, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_l2_6th', 'start': 24714, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_l2_7th', 'start': 24716, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_l2_8th', 'start': 24718, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_l2_9th', 'start': 24720, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_l2_10th', 'start': 24722, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_l2_11th', 'start': 24724, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_l2_12th', 'start': 24726, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_l2_13th', 'start': 24728, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_l2_14th', 'start': 24730, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_l2_15th', 'start': 24732, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_l2_16th', 'start': 24734, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_l3_thd', 'start': 24832, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_l3_2nd', 'start': 24834, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_l3_3rd', 'start': 24836, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_l3_4th', 'start': 24838, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_l3_5th', 'start': 24840, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_l3_6th', 'start': 24842, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_l3_7th', 'start': 24844, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_l3_8th', 'start': 24846, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_l3_9th', 'start': 24848, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_l3_10th', 'start': 24850, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_l3_11th', 'start': 24852, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_l3_12th', 'start': 24854, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_l3_13th', 'start': 24856, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_l3_14th', 'start': 24858, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_l3_15th', 'start': 24860, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_l3_16th', 'start': 24862, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_n_thd', 'start': 24960, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_n_2nd', 'start': 24962, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_n_3rd', 'start': 24964, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_n_4th', 'start': 24966, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_n_5th', 'start': 24968, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_n_6th', 'start': 24970, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_n_7th', 'start': 24972, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_n_8th', 'start': 24974, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_n_9th', 'start': 24976, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_n_10th', 'start': 24978, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_n_11th', 'start': 24980, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_n_12th', 'start': 24982, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_n_13th', 'start': 24984, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_n_14th', 'start': 24986, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_n_15th', 'start': 24988, 'length': 2, 'signed': False, 'decimals': 1},
-            {'name': 'current_harmonics_n_16th', 'start': 24990, 'length': 2, 'signed': False, 'decimals': 1}]
+    _REGS = [{'name': 'active_import',              'start': 20480, 'length': 4, 'signed': True, 'decimals': 2},
+             {'name': 'active_export',              'start': 20484, 'length': 4, 'signed': True, 'decimals': 2},
+             {'name': 'active_net',                 'start': 20488, 'length': 4, 'signed': True, 'decimals': 2},
+             {'name': 'reactive_import',            'start': 20492, 'length': 4, 'signed': True, 'decimals': 2},
+             {'name': 'reactive_export',            'start': 20496, 'length': 4, 'signed': True, 'decimals': 2},
+             {'name': 'reactive_net',               'start': 20500, 'length': 4, 'signed': True, 'decimals': 2},
+             {'name': 'apparent_import',            'start': 20504, 'length': 4, 'signed': True, 'decimals': 2},
+             {'name': 'apparent_export',            'start': 20508, 'length': 4, 'signed': True, 'decimals': 2},
+             {'name': 'apparent_net',               'start': 20512, 'length': 4, 'signed': True, 'decimals': 2},
+             {'name': 'active_import_co2',          'start': 20516, 'length': 4, 'signed': True, 'decimals': 2},
+             {'name': 'active_import_currency',     'start': 20532, 'length': 4, 'signed': True, 'decimals': 2},
+             {'name': 'active_import_tariff_1',     'start': 20848, 'length': 4, 'signed': False, 'decimals': 2},
+             {'name': 'active_import_tariff_2',     'start': 20852, 'length': 4, 'signed': False, 'decimals': 2},
+             {'name': 'active_import_tariff_3',     'start': 20856, 'length': 4, 'signed': False, 'decimals': 2},
+             {'name': 'active_import_tariff_4',     'start': 20860, 'length': 4, 'signed': False, 'decimals': 2},
+             {'name': 'active_export_tariff_1',     'start': 20880, 'length': 4, 'signed': False, 'decimals': 2},
+             {'name': 'active_export_tariff_2',     'start': 20884, 'length': 4, 'signed': False, 'decimals': 2},
+             {'name': 'active_export_tariff_3',     'start': 20888, 'length': 4, 'signed': False, 'decimals': 2},
+             {'name': 'active_export_tariff_4',     'start': 20892, 'length': 4, 'signed': False, 'decimals': 2},
+             {'name': 'reactive_import_tariff_1',   'start': 20912, 'length': 4, 'signed': False, 'decimals': 2},
+             {'name': 'reactive_import_tariff_2',   'start': 20916, 'length': 4, 'signed': False, 'decimals': 2},
+             {'name': 'reactive_import_tariff_3',   'start': 20920, 'length': 4, 'signed': False, 'decimals': 2},
+             {'name': 'reactive_import_tariff_4',   'start': 20924, 'length': 4, 'signed': False, 'decimals': 2},
+             {'name': 'reactive_export_tariff_1',   'start': 20944, 'length': 4, 'signed': False, 'decimals': 2},
+             {'name': 'reactive_export_tariff_2',   'start': 20948, 'length': 4, 'signed': False, 'decimals': 2},
+             {'name': 'reactive_export_tariff_3',   'start': 20952, 'length': 4, 'signed': False, 'decimals': 2},
+             {'name': 'reactive_export_tariff_4',   'start': 20956, 'length': 4, 'signed': False, 'decimals': 2},
+             {'name': 'active_import_l1',           'start': 21600, 'length': 4, 'signed': False, 'decimals': 2},
+             {'name': 'active_import_l2',           'start': 21604, 'length': 4, 'signed': False, 'decimals': 2},
+             {'name': 'active_import_l3',           'start': 21608, 'length': 4, 'signed': False, 'decimals': 2},
+             {'name': 'active_export_l1',           'start': 21612, 'length': 4, 'signed': False, 'decimals': 2},
+             {'name': 'active_export_l2',           'start': 21616, 'length': 4, 'signed': False, 'decimals': 2},
+             {'name': 'active_export_l3',           'start': 21620, 'length': 4, 'signed': False, 'decimals': 2},
+             {'name': 'active_net_l1',              'start': 21624, 'length': 4, 'signed': True, 'decimals': 2},
+             {'name': 'active_net_l2',              'start': 21628, 'length': 4, 'signed': True, 'decimals': 2},
+             {'name': 'active_net_l3',              'start': 21632, 'length': 4, 'signed': True, 'decimals': 2},
+             {'name': 'reactive_import_l1',         'start': 21636, 'length': 4, 'signed': False, 'decimals': 2},
+             {'name': 'reactive_import_l2',         'start': 21640, 'length': 4, 'signed': False, 'decimals': 2},
+             {'name': 'reactive_import_l3',         'start': 21644, 'length': 4, 'signed': False, 'decimals': 2},
+             {'name': 'reactive_export_l1',         'start': 21648, 'length': 4, 'signed': False, 'decimals': 2},
+             {'name': 'reactive_export_l2',         'start': 21652, 'length': 4, 'signed': False, 'decimals': 2},
+             {'name': 'reactive_export_l3',         'start': 21656, 'length': 4, 'signed': False, 'decimals': 2},
+             {'name': 'reactive_net_l1',            'start': 21660, 'length': 4, 'signed': True, 'decimals': 2},
+             {'name': 'reactive_net_l2',            'start': 21664, 'length': 4, 'signed': True, 'decimals': 2},
+             {'name': 'reactive_net_l3',            'start': 21668, 'length': 4, 'signed': True, 'decimals': 2},
+             {'name': 'apparent_import_l1',         'start': 21672, 'length': 4, 'signed': False, 'decimals': 2},
+             {'name': 'apparent_import_l2',         'start': 21676, 'length': 4, 'signed': False, 'decimals': 2},
+             {'name': 'apparent_import_l3',         'start': 21680, 'length': 4, 'signed': False, 'decimals': 2},
+             {'name': 'apparent_export_l1',         'start': 21684, 'length': 4, 'signed': False, 'decimals': 2},
+             {'name': 'apparent_export_l2',         'start': 21688, 'length': 4, 'signed': False, 'decimals': 2},
+             {'name': 'apparent_export_l3',         'start': 21692, 'length': 4, 'signed': False, 'decimals': 2},
+             {'name': 'apparent_net_l1',            'start': 21696, 'length': 4, 'signed': True, 'decimals': 2},
+             {'name': 'apparent_net_l2',            'start': 21700, 'length': 4, 'signed': True, 'decimals': 2},
+             {'name': 'apparent_net_l3',            'start': 21704, 'length': 4, 'signed': True, 'decimals': 2},
+             {'name': 'resettable_active_import',   'start': 21804, 'length': 4, 'signed': False, 'decimals': 2},
+             {'name': 'resettable_active_export',   'start': 21808, 'length': 4, 'signed': False, 'decimals': 2},
+             {'name': 'resettable_reactive_import', 'start': 21812, 'length': 4, 'signed': False, 'decimals': 2},
+             {'name': 'resettable_reactive_export', 'start': 21816, 'length': 4, 'signed': False, 'decimals': 2},
+             {'name': 'voltage_l1_n',               'start': 23296, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_l2_n',               'start': 23298, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_l3_n',               'start': 23300, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_l1_l2',              'start': 23302, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_l3_l2',              'start': 23304, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_l1_l3',              'start': 23306, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_l1',                 'start': 23308, 'length': 2, 'signed': False, 'decimals': 2},
+             {'name': 'current_l2',                 'start': 23310, 'length': 2, 'signed': False, 'decimals': 2},
+             {'name': 'current_l3',                 'start': 23312, 'length': 2, 'signed': False, 'decimals': 2},
+             {'name': 'current_n',                  'start': 23314, 'length': 2, 'signed': False, 'decimals': 2},
+             {'name': 'active_power_total',         'start': 23316, 'length': 2, 'signed': True, 'decimals': 2},
+             {'name': 'active_power_l1',            'start': 23318, 'length': 2, 'signed': True, 'decimals': 2},
+             {'name': 'active_power_l2',            'start': 23320, 'length': 2, 'signed': True, 'decimals': 2},
+             {'name': 'active_power_l3',            'start': 23322, 'length': 2, 'signed': True, 'decimals': 2},
+             {'name': 'reactive_power_total',       'start': 23324, 'length': 2, 'signed': True, 'decimals': 2},
+             {'name': 'reactive_power_l1',          'start': 23326, 'length': 2, 'signed': True, 'decimals': 2},
+             {'name': 'reactive_power_l2',          'start': 23328, 'length': 2, 'signed': True, 'decimals': 2},
+             {'name': 'reactive_power_l3',          'start': 23330, 'length': 2, 'signed': True, 'decimals': 2},
+             {'name': 'apparent_power_total',       'start': 23332, 'length': 2, 'signed': True, 'decimals': 2},
+             {'name': 'apparent_power_l1',          'start': 23334, 'length': 2, 'signed': True, 'decimals': 2},
+             {'name': 'apparent_power_l2',          'start': 23336, 'length': 2, 'signed': True, 'decimals': 2},
+             {'name': 'apparent_power_l3',          'start': 23338, 'length': 2, 'signed': True, 'decimals': 2},
+             {'name': 'frequency',                  'start': 23340, 'length': 1, 'signed': False, 'decimals': 2},
+             {'name': 'phase_angle_power_total',    'start': 23341, 'length': 1, 'signed': True, 'decimals': 1},
+             {'name': 'phase_angle_power_l1',       'start': 23342, 'length': 1, 'signed': True, 'decimals': 1},
+             {'name': 'phase_angle_power_l2',       'start': 23343, 'length': 1, 'signed': True, 'decimals': 1},
+             {'name': 'phase_angle_power_l3',       'start': 23344, 'length': 1, 'signed': True, 'decimals': 1},
+             {'name': 'phase_angle_voltage_l1',     'start': 23345, 'length': 1, 'signed': True, 'decimals': 1},
+             {'name': 'phase_angle_voltage_l2',     'start': 23346, 'length': 1, 'signed': True, 'decimals': 1},
+             {'name': 'phase_angle_voltage_l3',     'start': 23347, 'length': 1, 'signed': True, 'decimals': 1},
+             {'name': 'phase_angle_current_l1',     'start': 23351, 'length': 1, 'signed': True, 'decimals': 1},
+             {'name': 'phase_angle_current_l2',     'start': 23352, 'length': 1, 'signed': True, 'decimals': 1},
+             {'name': 'phase_angle_current_l3',     'start': 23353, 'length': 1, 'signed': True, 'decimals': 1},
+             {'name': 'power_factor_total',         'start': 23354, 'length': 1, 'signed': True, 'decimals': 3},
+             {'name': 'power_factor_l1',            'start': 23355, 'length': 1, 'signed': True, 'decimals': 3},
+             {'name': 'power_factor_l2',            'start': 23356, 'length': 1, 'signed': True, 'decimals': 3},
+             {'name': 'power_factor_l3',            'start': 23357, 'length': 1, 'signed': True, 'decimals': 3},
+             {'name': 'current_quadrant_total',     'start': 23358, 'length': 1, 'signed': False, 'decimals': 0},
+             {'name': 'current_quadrant_l1',        'start': 23359, 'length': 1, 'signed': False, 'decimals': 0},
+             {'name': 'current_quadrant_l2',        'start': 23360, 'length': 1, 'signed': False, 'decimals': 0},
+             {'name': 'current_quadrant_l3',        'start': 23361, 'length': 1, 'signed': False, 'decimals': 0},
+             {'name': 'voltage_harmonics_l1_n_thd', 'start': 23808, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l1_n_2nd', 'start': 23810, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l1_n_3rd', 'start': 23812, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l1_n_4th', 'start': 23814, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l1_n_5th', 'start': 23816, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l1_n_6th', 'start': 23818, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l1_n_7th', 'start': 23820, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l1_n_8th', 'start': 23822, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l1_n_9th', 'start': 23824, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l1_n_10th', 'start': 23826, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l1_n_11th', 'start': 23828, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l1_n_12th', 'start': 23830, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l1_n_13th', 'start': 23832, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l1_n_14th', 'start': 23834, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l1_n_15th', 'start': 23836, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l1_n_16th', 'start': 23838, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l2_n_thd', 'start': 23936, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l2_n_2nd', 'start': 23938, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l2_n_3rd', 'start': 23940, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l2_n_4th', 'start': 23942, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l2_n_5th', 'start': 23944, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l2_n_6th', 'start': 23946, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l2_n_7th', 'start': 23948, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l2_n_8th', 'start': 23950, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l2_n_9th', 'start': 23952, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l2_n_10th', 'start': 23954, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l2_n_11th', 'start': 23956, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l2_n_12th', 'start': 23958, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l2_n_13th', 'start': 23960, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l2_n_14th', 'start': 23962, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l2_n_15th', 'start': 23964, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l2_n_16th', 'start': 23966, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l3_n_thd', 'start': 24064, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l3_n_2nd', 'start': 24066, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l3_n_3rd', 'start': 24068, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l3_n_4th', 'start': 24070, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l3_n_5th', 'start': 24072, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l3_n_6th', 'start': 24074, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l3_n_7th', 'start': 24076, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l3_n_8th', 'start': 24078, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l3_n_9th', 'start': 24080, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l3_n_10th', 'start': 24082, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l3_n_11th', 'start': 24084, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l3_n_12th', 'start': 24086, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l3_n_13th', 'start': 24088, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l3_n_14th', 'start': 24090, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l3_n_15th', 'start': 24092, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l3_n_16th', 'start': 24094, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l1_l2_thd', 'start': 24192, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l1_l2_2nd', 'start': 24194, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l1_l2_3rd', 'start': 24196, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l1_l2_4th', 'start': 24198, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l1_l2_5th', 'start': 24200, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l1_l2_6th', 'start': 24202, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l1_l2_7th', 'start': 24204, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l1_l2_8th', 'start': 24206, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l1_l2_9th', 'start': 24208, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l1_l2_10th', 'start': 24210, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l1_l2_11th', 'start': 24212, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l1_l2_12th', 'start': 24214, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l1_l2_13th', 'start': 24216, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l1_l2_14th', 'start': 24218, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l1_l2_15th', 'start': 24220, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l1_l2_16th', 'start': 24222, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l3_l2_thd', 'start': 24320, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l3_l2_2nd', 'start': 24322, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l3_l2_3rd', 'start': 24324, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l3_l2_4th', 'start': 24326, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l3_l2_5th', 'start': 24328, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l3_l2_6th', 'start': 24330, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l3_l2_7th', 'start': 24332, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l3_l2_8th', 'start': 24334, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l3_l2_9th', 'start': 24336, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l3_l2_10th', 'start': 24338, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l3_l2_11th', 'start': 24340, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l3_l2_12th', 'start': 24342, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l3_l2_13th', 'start': 24344, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l3_l2_14th', 'start': 24346, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l3_l2_15th', 'start': 24348, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l3_l2_16th', 'start': 24350, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l1_l3_thd', 'start': 24448, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l1_l3_2nd', 'start': 24450, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l1_l3_3rd', 'start': 24452, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l1_l3_4th', 'start': 24454, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l1_l3_5th', 'start': 24456, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l1_l3_6th', 'start': 24458, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l1_l3_7th', 'start': 24460, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l1_l3_8th', 'start': 24462, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l1_l3_9th', 'start': 24464, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l1_l3_10th', 'start': 24466, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l1_l3_11th', 'start': 24468, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l1_l3_12th', 'start': 24470, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l1_l3_13th', 'start': 24472, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l1_l3_14th', 'start': 24474, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l1_l3_15th', 'start': 24476, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'voltage_harmonics_l1_l3_16th', 'start': 24478, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_l1_thd', 'start': 24576, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_l1_2nd', 'start': 24578, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_l1_3rd', 'start': 24580, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_l1_4th', 'start': 24582, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_l1_5th', 'start': 24584, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_l1_6th', 'start': 24586, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_l1_7th', 'start': 24588, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_l1_8th', 'start': 24590, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_l1_9th', 'start': 24592, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_l1_10th', 'start': 24594, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_l1_11th', 'start': 24596, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_l1_12th', 'start': 24598, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_l1_13th', 'start': 24600, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_l1_14th', 'start': 24602, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_l1_15th', 'start': 24604, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_l1_16th', 'start': 24606, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_l2_thd', 'start': 24704, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_l2_2nd', 'start': 24706, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_l2_3rd', 'start': 24708, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_l2_4th', 'start': 24710, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_l2_5th', 'start': 24712, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_l2_6th', 'start': 24714, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_l2_7th', 'start': 24716, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_l2_8th', 'start': 24718, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_l2_9th', 'start': 24720, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_l2_10th', 'start': 24722, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_l2_11th', 'start': 24724, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_l2_12th', 'start': 24726, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_l2_13th', 'start': 24728, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_l2_14th', 'start': 24730, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_l2_15th', 'start': 24732, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_l2_16th', 'start': 24734, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_l3_thd', 'start': 24832, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_l3_2nd', 'start': 24834, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_l3_3rd', 'start': 24836, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_l3_4th', 'start': 24838, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_l3_5th', 'start': 24840, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_l3_6th', 'start': 24842, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_l3_7th', 'start': 24844, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_l3_8th', 'start': 24846, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_l3_9th', 'start': 24848, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_l3_10th', 'start': 24850, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_l3_11th', 'start': 24852, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_l3_12th', 'start': 24854, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_l3_13th', 'start': 24856, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_l3_14th', 'start': 24858, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_l3_15th', 'start': 24860, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_l3_16th', 'start': 24862, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_n_thd', 'start': 24960, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_n_2nd', 'start': 24962, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_n_3rd', 'start': 24964, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_n_4th', 'start': 24966, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_n_5th', 'start': 24968, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_n_6th', 'start': 24970, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_n_7th', 'start': 24972, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_n_8th', 'start': 24974, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_n_9th', 'start': 24976, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_n_10th', 'start': 24978, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_n_11th', 'start': 24980, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_n_12th', 'start': 24982, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_n_13th', 'start': 24984, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_n_14th', 'start': 24986, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_n_15th', 'start': 24988, 'length': 2, 'signed': False, 'decimals': 1},
+             {'name': 'current_harmonics_n_16th', 'start': 24990, 'length': 2, 'signed': False, 'decimals': 1}]
     REGSETS = {
                "A43": ["active_import", "active_export", "active_net",
                        "reactive_import", "reactive_export", "reactive_net",
@@ -547,6 +570,58 @@ class ABBMeter:
                        "current_quadrant_total"]
                }
     NULLS = [pow(2, n) - 1 for n in (64, 63, 32, 31, 16, 15)]
+
+
+class MEM001(ModbusRTUMeter):
+    NULLS = []
+    REGS = [{'name': 'feeder_1_id', 'start': 0x2005, 'length': 1, 'signed': False, 'decimals': 0},
+            {'name': 'feeder_2_id', 'start': 0x2006, 'length': 1, 'signed': False, 'decimals': 0},
+            {'name': 'feeder_3_id', 'start': 0x2007, 'length': 1, 'signed': False, 'decimals': 0},
+            {'name': 'feeder_4_id', 'start': 0x2008, 'length': 1, 'signed': False, 'decimals': 0},
+            {'name': 'feeder_5_id', 'start': 0x2009, 'length': 1, 'signed': False, 'decimals': 0},
+            {'name': 'feeder_6_id', 'start': 0x200A, 'length': 1, 'signed': False, 'decimals': 0},
+            {'name': 'feeder_7_id', 'start': 0x200B, 'length': 1, 'signed': False, 'decimals': 0},
+            {'name': 'feeder_8_id', 'start': 0x200C, 'length': 1, 'signed': False, 'decimals': 0},
+
+            {'name': 'voltage_l1_n', 'start': 0xD006, 'length': 2, 'signed': False, 'decimals': 0, 'float': True},
+            {'name': 'voltage_l2_n', 'start': 0xD008, 'length': 2, 'signed': False, 'decimals': 0, 'float': True},
+            {'name': 'voltage_l3_n', 'start': 0xD00A, 'length': 2, 'signed': False, 'decimals': 0, 'float': True},
+
+            {'name': 'current_l1', 'start': 0xD012, 'length': 2, 'signed': False, 'decimals': 0, 'float': True},
+            {'name': 'current_l2', 'start': 0xD014, 'length': 2, 'signed': False, 'decimals': 0, 'float': True},
+            {'name': 'current_l3', 'start': 0xD016, 'length': 2, 'signed': False, 'decimals': 0, 'float': True},
+
+            {'name': 'active_power_total', 'start': 0xD01A, 'length': 2, 'signed': True, 'decimals': 0, 'float': True},
+            {'name': 'reactive_power_total', 'start': 0xD01C, 'length': 2, 'signed': True, 'decimals': 0, 'float': True},
+
+            {'name': 'active_power_l1', 'start': 0xD023, 'length': 2, 'signed': True, 'decimals': 0, 'float': True},
+            {'name': 'active_power_l2', 'start': 0xD025, 'length': 2, 'signed': True, 'decimals': 0, 'float': True},
+            {'name': 'active_power_l3', 'start': 0xD027, 'length': 2, 'signed': True, 'decimals': 0, 'float': True},
+
+            {'name': 'reactive_power_l1', 'start': 0xD029, 'length': 2, 'signed': True, 'decimals': 0, 'float': True},
+            {'name': 'reactive_power_l2', 'start': 0xD02B, 'length': 2, 'signed': True, 'decimals': 0, 'float': True},
+            {'name': 'reactive_power_l3', 'start': 0xD02D, 'length': 2, 'signed': True, 'decimals': 0, 'float': True},
+
+            {'name': 'power_factor_l1', 'start': 0xD035, 'length': 2, 'signed': True, 'decimals': 0, 'float': True},
+            {'name': 'power_factor_l2', 'start': 0xD037, 'length': 2, 'signed': True, 'decimals': 0, 'float': True},
+            {'name': 'power_factor_l3', 'start': 0xD039, 'length': 2, 'signed': True, 'decimals': 0, 'float': True},
+
+            {'name': 'current_harmonics_l1', 'start': 0xD044, 'length': 2, 'signed': True, 'decimals': 0, 'float': True},
+            {'name': 'current_harmonics_l2', 'start': 0xD046, 'length': 2, 'signed': True, 'decimals': 0, 'float': True},
+            {'name': 'current_harmonics_l3', 'start': 0xD048, 'length': 2, 'signed': True, 'decimals': 0, 'float': True},
+
+            {'name': 'current_harmonics_l1_3rd', 'start': 0xD052, 'length': 2, 'signed': True, 'decimals': 0, 'float': True},
+            {'name': 'current_harmonics_l2_3rd', 'start': 0xD054, 'length': 2, 'signed': True, 'decimals': 0, 'float': True},
+            {'name': 'current_harmonics_l3_3rd', 'start': 0xD056, 'length': 2, 'signed': True, 'decimals': 0, 'float': True},
+
+            {'name': 'current_harmonics_l1_5th', 'start': 0xD058, 'length': 2, 'signed': True, 'decimals': 0, 'float': True},
+            {'name': 'current_harmonics_l2_5th', 'start': 0xD05A, 'length': 2, 'signed': True, 'decimals': 0, 'float': True},
+            {'name': 'current_harmonics_l3_5th', 'start': 0xD05C, 'length': 2, 'signed': True, 'decimals': 0, 'float': True},
+
+            {'name': 'current_harmonics_l1_7th', 'start': 0xD05E, 'length': 2, 'signed': True, 'decimals': 0, 'float': True},
+            {'name': 'current_harmonics_l2_7th', 'start': 0xD060, 'length': 2, 'signed': True, 'decimals': 0, 'float': True},
+            {'name': 'current_harmonics_l3_7th', 'start': 0xD062, 'length': 2, 'signed': True, 'decimals': 0, 'float': True}
+           ]
 
 
 class ModbusTCPMeter:
@@ -903,12 +978,10 @@ class AsyncABBTCPMeter(AsyncModbusTCPMeter):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         if type in ABBMeter.REGSETS:
-            self.registers = [register for register in ABBMeter.REGS if register['name'] in ABBMeter.REGSETS[type]]
+            self.REGS = [register for register in ABBMeter._REGS if register['name'] in ABBMeter.REGSETS[type]]
         else:
-            self.registers = ABBMeter.REGS
+            self.REGS = ABBMeter.REGS
 
-    REGS = ABBMeter.REGS
-    REGSETS = ABBMeter.REGSETS
     NULLS = ABBMeter.NULLS
     PROTOCOL_CODE = 0
     FUNCTION_CODE = 3
@@ -1011,7 +1084,7 @@ class SaiaMeter:
 
         first_reg = min([register['start'] for register in registers])
         num_regs = max([register['start'] + register['length'] for register in registers]) - first_reg
-        values = self.instrument.read_registers(start_register=first_reg,
+        values = self.instrument.read_registers(register_address=first_reg,
                                                 num_registers=num_regs)
         return self._interpret_result(values, registers)
 
@@ -1132,3 +1205,5 @@ class SaiaMeter:
             {'name': 'power_factor_l3',            'start': 38, 'length': 1, 'signed': True, 'decimals': 2},
             {'name': 'active_power_total',         'start': 39, 'length': 1, 'signed': True, 'decimals': 2},
             {'name': 'reactive_power_total',       'start': 40, 'length': 1, 'signed': True, 'decimals': 2}]
+
+
