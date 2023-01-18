@@ -13,8 +13,8 @@ Some base classes are also provided for you to implement new meter variants.
 ## Installation
 
 ```
-git clone https://gitlab.com/elaad/energymeter
-cd energymeter
+git clone https://github.com/ElaadNL/python-energymeter
+cd python-energymeter
 pip3 install .
 ```
 
@@ -46,5 +46,3 @@ data = meter.read(['current_l1', 'voltage_l1_n'])
 ```
 
 This returns a dictionary with the requested keys and values.
-
-

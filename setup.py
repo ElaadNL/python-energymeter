@@ -29,8 +29,8 @@ setup(
     author       = metadata['author'],
     author_email = metadata['email'],
     url          = metadata['url'],
-    description="Wrapper for Minimalmodbus to use with ABB Energy Meters.",
-    install_requires = ['pyserial', 'minimalmodbus', 'tinysbus'],
+    description="A Python module for interfacing with several energy meters.",
+    install_requires = ['pyserial', 'minimalmodbus~=1.0', 'tinysbus'],
     py_modules = ['energymeter'],
-    keywords='ABB Energy Meter Modbus'
+    keywords='Energy Meter Modbus'
 )
