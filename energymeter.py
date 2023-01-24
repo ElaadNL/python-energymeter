@@ -1,17 +1,4 @@
 #!/usr/bin/env python3
-
-"""
-EnergyMeter: A Python module for interfacing with several energy meters.
-"""
-
-__author__  = 'ElaadNL, Stan Janssen'
-__email__   = 'developers@elaad.nl'
-__url__     = 'https://github.com/ElaadNL/python-energymeter'
-__license__ = 'Apache License, Version 2.0'
-
-__version__ = '1.3.0'
-__status__  = 'Beta'
-
 import random
 import socket
 import struct
