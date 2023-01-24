@@ -4,11 +4,12 @@ import socket
 import struct
 import asyncio
 import time
+
 import minimalmodbus
 import tinysbus
-from collections import Iterable
 
-DEBUG = False
+from collections.abc import Iterable
+
 
 class ModbusRTUMeter:
     """Meter class that uses a minimalmodbus Instrument to query an ABB meter."""
@@ -25,7 +26,7 @@ class ModbusRTUMeter:
             * An ABBMeter object
 
         """
-        self.instrument = minimalmodbus.Instrument(port, slaveaddress, debug=DEBUG)
+        self.instrument = minimalmodbus.Instrument(port, slaveaddress)
         self.instrument.serial.baudrate = baudrate
         self.instrument.serial.timeout = timeout
 
@@ -82,7 +83,7 @@ class ModbusRTUMeter:
                                                  number_of_decimals=register['decimals'],
                                                  signed=register['signed'])
         if register['length'] == 2:
-            if register.get('float'):
+            if register.get('is_float'):
                 return self.instrument.read_float(registeraddress=register['start'],
                                                   number_of_registers=2)
             else:
@@ -96,7 +97,7 @@ class ModbusRTUMeter:
             return self._convert_value(values=value,
                                        signed=register['signed'],
                                        number_of_decimals=register['decimals'],
-                                       float=register.get('float'))
+                                       is_float=register.get('is_float'))
 
     def _read_multiple(self, registers):
         """
@@ -165,10 +166,10 @@ class ModbusRTUMeter:
             results[regname] = self._convert_value(values=values,
                                                    signed=register['signed'],
                                                    number_of_decimals=register['decimals'],
-                                                   float=register.get('float'))
+                                                   is_float=register.get('is_float'))
         return results
 
-    def _convert_value(self, values, signed=False, number_of_decimals=0, float=False):
+    def _convert_value(self, values, signed=False, number_of_decimals=0, is_float=False):
         """
         Convert a list of returned integers to the intended value.
 
@@ -177,7 +178,7 @@ class ModbusRTUMeter:
             * signed: whether the value is a signed value
             * decimals: number of decimals the return value should contain
         """
-        if float:
+        if is_float:
             if len(values) == 2:
                 bytestring = struct.pack('>HH', *values)
                 return struct.unpack('>f', bytestring)[0]
@@ -226,7 +227,7 @@ class ABBMeter(ModbusRTUMeter):
     def __init__(self, port, baudrate=38400, slaveaddress=1, timeout=0.5, model=None):
         super().__init__(port, baudrate, slaveaddress, timeout)
         if model in ABBMeter.REGSETS:
-            self.REGS = [register for register in ABBMeter._REGS if register['name'] in ABBMeter.REGSETS[type]]
+            self.REGS = [register for register in ABBMeter._REGS if register['name'] in ABBMeter.REGSETS[model]]
         else:
             self.REGS = ABBMeter._REGS
 
@@ -570,44 +571,44 @@ class MEM001(ModbusRTUMeter):
             {'name': 'feeder_7_id', 'start': 0x200B, 'length': 1, 'signed': False, 'decimals': 0},
             {'name': 'feeder_8_id', 'start': 0x200C, 'length': 1, 'signed': False, 'decimals': 0},
 
-            {'name': 'voltage_l1_n', 'start': 0xD006, 'length': 2, 'signed': False, 'decimals': 0, 'float': True},
-            {'name': 'voltage_l2_n', 'start': 0xD008, 'length': 2, 'signed': False, 'decimals': 0, 'float': True},
-            {'name': 'voltage_l3_n', 'start': 0xD00A, 'length': 2, 'signed': False, 'decimals': 0, 'float': True},
+            {'name': 'voltage_l1_n', 'start': 0xD006, 'length': 2, 'signed': False, 'decimals': 0, 'is_float': True},
+            {'name': 'voltage_l2_n', 'start': 0xD008, 'length': 2, 'signed': False, 'decimals': 0, 'is_float': True},
+            {'name': 'voltage_l3_n', 'start': 0xD00A, 'length': 2, 'signed': False, 'decimals': 0, 'is_float': True},
 
-            {'name': 'current_l1', 'start': 0xD012, 'length': 2, 'signed': False, 'decimals': 0, 'float': True},
-            {'name': 'current_l2', 'start': 0xD014, 'length': 2, 'signed': False, 'decimals': 0, 'float': True},
-            {'name': 'current_l3', 'start': 0xD016, 'length': 2, 'signed': False, 'decimals': 0, 'float': True},
+            {'name': 'current_l1', 'start': 0xD012, 'length': 2, 'signed': False, 'decimals': 0, 'is_float': True},
+            {'name': 'current_l2', 'start': 0xD014, 'length': 2, 'signed': False, 'decimals': 0, 'is_float': True},
+            {'name': 'current_l3', 'start': 0xD016, 'length': 2, 'signed': False, 'decimals': 0, 'is_float': True},
 
-            {'name': 'active_power_total', 'start': 0xD01A, 'length': 2, 'signed': True, 'decimals': 0, 'float': True},
-            {'name': 'reactive_power_total', 'start': 0xD01C, 'length': 2, 'signed': True, 'decimals': 0, 'float': True},
+            {'name': 'active_power_total', 'start': 0xD01A, 'length': 2, 'signed': True, 'decimals': 0, 'is_float': True},
+            {'name': 'reactive_power_total', 'start': 0xD01C, 'length': 2, 'signed': True, 'decimals': 0, 'is_float': True},
 
-            {'name': 'active_power_l1', 'start': 0xD023, 'length': 2, 'signed': True, 'decimals': 0, 'float': True},
-            {'name': 'active_power_l2', 'start': 0xD025, 'length': 2, 'signed': True, 'decimals': 0, 'float': True},
-            {'name': 'active_power_l3', 'start': 0xD027, 'length': 2, 'signed': True, 'decimals': 0, 'float': True},
+            {'name': 'active_power_l1', 'start': 0xD023, 'length': 2, 'signed': True, 'decimals': 0, 'is_float': True},
+            {'name': 'active_power_l2', 'start': 0xD025, 'length': 2, 'signed': True, 'decimals': 0, 'is_float': True},
+            {'name': 'active_power_l3', 'start': 0xD027, 'length': 2, 'signed': True, 'decimals': 0, 'is_float': True},
 
-            {'name': 'reactive_power_l1', 'start': 0xD029, 'length': 2, 'signed': True, 'decimals': 0, 'float': True},
-            {'name': 'reactive_power_l2', 'start': 0xD02B, 'length': 2, 'signed': True, 'decimals': 0, 'float': True},
-            {'name': 'reactive_power_l3', 'start': 0xD02D, 'length': 2, 'signed': True, 'decimals': 0, 'float': True},
+            {'name': 'reactive_power_l1', 'start': 0xD029, 'length': 2, 'signed': True, 'decimals': 0, 'is_float': True},
+            {'name': 'reactive_power_l2', 'start': 0xD02B, 'length': 2, 'signed': True, 'decimals': 0, 'is_float': True},
+            {'name': 'reactive_power_l3', 'start': 0xD02D, 'length': 2, 'signed': True, 'decimals': 0, 'is_float': True},
 
-            {'name': 'power_factor_l1', 'start': 0xD035, 'length': 2, 'signed': True, 'decimals': 0, 'float': True},
-            {'name': 'power_factor_l2', 'start': 0xD037, 'length': 2, 'signed': True, 'decimals': 0, 'float': True},
-            {'name': 'power_factor_l3', 'start': 0xD039, 'length': 2, 'signed': True, 'decimals': 0, 'float': True},
+            {'name': 'power_factor_l1', 'start': 0xD035, 'length': 2, 'signed': True, 'decimals': 0, 'is_float': True},
+            {'name': 'power_factor_l2', 'start': 0xD037, 'length': 2, 'signed': True, 'decimals': 0, 'is_float': True},
+            {'name': 'power_factor_l3', 'start': 0xD039, 'length': 2, 'signed': True, 'decimals': 0, 'is_float': True},
 
-            {'name': 'current_harmonics_l1', 'start': 0xD044, 'length': 2, 'signed': True, 'decimals': 0, 'float': True},
-            {'name': 'current_harmonics_l2', 'start': 0xD046, 'length': 2, 'signed': True, 'decimals': 0, 'float': True},
-            {'name': 'current_harmonics_l3', 'start': 0xD048, 'length': 2, 'signed': True, 'decimals': 0, 'float': True},
+            {'name': 'current_harmonics_l1', 'start': 0xD044, 'length': 2, 'signed': True, 'decimals': 0, 'is_float': True},
+            {'name': 'current_harmonics_l2', 'start': 0xD046, 'length': 2, 'signed': True, 'decimals': 0, 'is_float': True},
+            {'name': 'current_harmonics_l3', 'start': 0xD048, 'length': 2, 'signed': True, 'decimals': 0, 'is_float': True},
 
-            {'name': 'current_harmonics_l1_3rd', 'start': 0xD052, 'length': 2, 'signed': True, 'decimals': 0, 'float': True},
-            {'name': 'current_harmonics_l2_3rd', 'start': 0xD054, 'length': 2, 'signed': True, 'decimals': 0, 'float': True},
-            {'name': 'current_harmonics_l3_3rd', 'start': 0xD056, 'length': 2, 'signed': True, 'decimals': 0, 'float': True},
+            {'name': 'current_harmonics_l1_3rd', 'start': 0xD052, 'length': 2, 'signed': True, 'decimals': 0, 'is_float': True},
+            {'name': 'current_harmonics_l2_3rd', 'start': 0xD054, 'length': 2, 'signed': True, 'decimals': 0, 'is_float': True},
+            {'name': 'current_harmonics_l3_3rd', 'start': 0xD056, 'length': 2, 'signed': True, 'decimals': 0, 'is_float': True},
 
-            {'name': 'current_harmonics_l1_5th', 'start': 0xD058, 'length': 2, 'signed': True, 'decimals': 0, 'float': True},
-            {'name': 'current_harmonics_l2_5th', 'start': 0xD05A, 'length': 2, 'signed': True, 'decimals': 0, 'float': True},
-            {'name': 'current_harmonics_l3_5th', 'start': 0xD05C, 'length': 2, 'signed': True, 'decimals': 0, 'float': True},
+            {'name': 'current_harmonics_l1_5th', 'start': 0xD058, 'length': 2, 'signed': True, 'decimals': 0, 'is_float': True},
+            {'name': 'current_harmonics_l2_5th', 'start': 0xD05A, 'length': 2, 'signed': True, 'decimals': 0, 'is_float': True},
+            {'name': 'current_harmonics_l3_5th', 'start': 0xD05C, 'length': 2, 'signed': True, 'decimals': 0, 'is_float': True},
 
-            {'name': 'current_harmonics_l1_7th', 'start': 0xD05E, 'length': 2, 'signed': True, 'decimals': 0, 'float': True},
-            {'name': 'current_harmonics_l2_7th', 'start': 0xD060, 'length': 2, 'signed': True, 'decimals': 0, 'float': True},
-            {'name': 'current_harmonics_l3_7th', 'start': 0xD062, 'length': 2, 'signed': True, 'decimals': 0, 'float': True}
+            {'name': 'current_harmonics_l1_7th', 'start': 0xD05E, 'length': 2, 'signed': True, 'decimals': 0, 'is_float': True},
+            {'name': 'current_harmonics_l2_7th', 'start': 0xD060, 'length': 2, 'signed': True, 'decimals': 0, 'is_float': True},
+            {'name': 'current_harmonics_l3_7th', 'start': 0xD062, 'length': 2, 'signed': True, 'decimals': 0, 'is_float': True}
            ]
 
 
@@ -615,7 +616,7 @@ class ModbusTCPMeter:
     """
     Implementation for a Modbus TCP Energy Meter.
     """
-    def __init__(self, port, tcp_port=502, slaveaddress=126, type=None, baudrate=None):
+    def __init__(self, port, tcp_port=502, slaveaddress=126, model=None, baudrate=None):
         self.port = port
         self.tcp_port = tcp_port
         self.device_id = slaveaddress
@@ -713,12 +714,12 @@ class ModbusTCPMeter:
             results[regname] = self._convert_value(values=values,
                                                    signed=register['signed'],
                                                    decimals=register['decimals'],
-                                                   isFloat=register['isFloat'])
+                                                   is_float=register.get('is_float'))
             if regname == "power_factor_total" and results[regname] == 0:
                 results[regname] = 1    # The SMA will send out a 0 when the power factor is 100%
         return results
 
-    def _convert_value(self, values, signed=False, decimals=0, isFloat=False):
+    def _convert_value(self, values, signed=False, decimals=0, is_float=False):
         """
         Convert a list of returned integers to the intended value.
 
@@ -726,13 +727,13 @@ class ModbusTCPMeter:
             * bytestring: a list of integers that together represent the value
             * signed: whether the value is a signed value
             * decimals: number of decimals the return value should contain
-            * isFloat: whether the valie is a float
+            * is_float: whether the valie is a float
 
         """
         numberOfBytes = len(values)
         formatcode_o = '>'
 
-        if isFloat:
+        if is_float:
             formatcode_o += 'f'
 
         elif numberOfBytes == 1:
@@ -802,8 +803,8 @@ class MulticubeMeter(ModbusTCPMeter):
     """
     Implementation for a Multicube energy meter over Modbus TCP.
     """
-    def __init__(self, port, tcp_port=1502, slaveaddress=1, type=None, baudrate=None, auto_scale=True):
-        super().__init__(port, tcp_port, slaveaddress, type, baudrate)
+    def __init__(self, port, tcp_port=1502, slaveaddress=1, model=None, baudrate=None, auto_scale=True):
+        super().__init__(port, tcp_port, slaveaddress, model, baudrate)
         self.device = socket.create_connection(address=(port, tcp_port))
         self.device_id = slaveaddress
         self.REGS = [
@@ -939,7 +940,7 @@ class AsyncModbusTCPMeter(ModbusTCPMeter):
         await self.writer.drain()
 
         data = await self.reader.readexactly(9 + 2 * num_regs)
-        return self._convert_value(data[9:], signed=register['signed'], decimals=register['decimals'], isFloat=register['isFloat']|False)
+        return self._convert_value(data[9:], signed=register['signed'], decimals=register['decimals'], is_float=register.get('is_float'))
 
     async def _read_multiple(self, registers):
         registers.sort(key=lambda reg: reg['start'])
@@ -964,8 +965,8 @@ class AsyncModbusTCPMeter(ModbusTCPMeter):
 class AsyncABBTCPMeter(AsyncModbusTCPMeter):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        if type in ABBMeter.REGSETS:
-            self.REGS = [register for register in ABBMeter._REGS if register['name'] in ABBMeter.REGSETS[type]]
+        if model in ABBMeter.REGSETS:
+            self.REGS = [register for register in ABBMeter._REGS if register['name'] in ABBMeter.REGSETS[model]]
         else:
             self.REGS = ABBMeter.REGS
 
@@ -976,7 +977,7 @@ class AsyncABBTCPMeter(AsyncModbusTCPMeter):
 
 
 class SaiaMeter:
-    def __init__(self, port, baudrate=38400, slaveaddress=1, type=None, **kwargs):
+    def __init__(self, port, baudrate=38400, slaveaddress=1, model=None, **kwargs):
         """ Initialize the ABBMeter object.
 
         Arguments:
@@ -1072,7 +1073,7 @@ class SaiaMeter:
         first_reg = min([register['start'] for register in registers])
         num_regs = max([register['start'] + register['length'] for register in registers]) - first_reg
         values = self.instrument.read_registers(register_address=first_reg,
-                                                num_registers=num_regs)
+                                                number_of_registers=num_regs)
         return self._interpret_result(values, registers)
 
     def _batch_read(self, registers):

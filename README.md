@@ -25,7 +25,7 @@ To read all registers from a meter:
 ```
 from energymeter import ABBMeter
 
-meter = ABBMeter(port="/dev/ttyS0", baudrate=38400, slaveaddress=1, type="B23")
+meter = ABBMeter(port="/dev/ttyUSB0", baudrate=38400, slaveaddress=1, model="B23")
 data = meter.read()
 ```
 
